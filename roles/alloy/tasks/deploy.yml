@@ -21,74 +21,125 @@
   block:
     - name: Check if Alloy binary is present
       ansible.builtin.stat:
-        path: "/usr/bin/alloy"
+        path: "{{ alloy_install_dir }}/alloy"
       register: __already_deployed
 
     - name: Obtain current deployed Alloy version
       ansible.builtin.command:
-        cmd: "/usr/bin/alloy --version"
+        cmd: "{{ alloy_install_dir }}/alloy --version"
       changed_when: false
       register: __current_deployed_version
       when: __already_deployed.stat.exists | bool
 
-- name: Include RedHat/Rocky setup
+- name: Include RedHat/Rocky setup (root mode only)
   ansible.builtin.include_tasks:
     file: setup-RedHat.yml
-  when: ansible_facts['os_family'] in ['RedHat', 'Rocky']
+  when: 
+    - alloy_as_root | bool
+    - ansible_facts['os_family'] in ['RedHat', 'Rocky']
+  become: true
 
-- name: Include Debian/Ubuntu setup
+- name: Include Debian/Ubuntu setup (root mode only)
   ansible.builtin.include_tasks:
     file: setup-Debian.yml
-  when: ansible_facts['os_family'] == 'Debian'
+  when: 
+    - alloy_as_root | bool
+    - ansible_facts['os_family'] == 'Debian'
+  become: true
 
-- name: Alloy systemd override
-  when: alloy_systemd_override | length > 0
+- name: Download and install Alloy binary (non-root mode or if not installed)
+  when: 
+    - not alloy_as_root or (not __already_deployed.stat.exists or __current_deployed_version.stdout is not defined or alloy_version not in __current_deployed_version.stdout)
   block:
-    - name: Ensure that Alloy systemd override path exist
+    - name: Ensure Alloy binary directory exists
+      ansible.builtin.file:
+        path: "{{ alloy_install_dir }}"
+        state: directory
+        mode: "0755"
+      become: "{{ alloy_as_root }}"
+
+    - name: Download Alloy tarball
+      ansible.builtin.get_url:
+        url: "https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-linux-amd64-v{{ alloy_version }}.tar.gz"
+        dest: "/tmp/alloy-v{{ alloy_version }}.tar.gz"
+        mode: "0644"
+    - name: Extract Alloy binary
+      ansible.builtin.unarchive:
+        src: "/tmp/alloy-v{{ alloy_version }}.tar.gz"
+        dest: "{{ alloy_install_dir }}"
+        remote_src: true
+        creates: "{{ alloy_install_dir }}/alloy"
+        mode: "0755"
+      become: "{{ alloy_as_root }}"
+    - name: Clean up tarball
+      ansible.builtin.file:
+        path: "/tmp/alloy-v{{ alloy_version }}.tar.gz"
+        state: absent
+
+- name: Ensure Alloy config directory exists
+  ansible.builtin.file:
+    path: "{{ alloy_config_dir }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ 'root' if alloy_as_root else ansible_user_id }}"
+    group: "{{ 'root' if alloy_as_root else ansible_user_gid }}"
+  become: "{{ alloy_as_root }}"
+
+- name: Alloy systemd override (root mode only)
+  when: 
+    - alloy_as_root | bool
+    - alloy_systemd_override | length > 0
+  block:
+    - name: Ensure that Alloy systemd override path exists
       ansible.builtin.file:
         path: "/etc/systemd/system/alloy.service.d"
         state: directory
         owner: "root"
         group: "root"
         mode: "0750"
-      notify: restart alloy
+      notify: restart alloy system service
+      become: true
 
-    - name: Template Alloy systemd override.conf - /etc/systemd/system/alloy.service.d/override.conf
+    - name: Template Alloy systemd override.conf
       ansible.builtin.template:
         src: "override.conf.j2"
         dest: "/etc/systemd/system/alloy.service.d/override.conf"
         owner: "root"
         group: "root"
         mode: "0644"
-      notify: restart alloy
+      notify: restart alloy system service
+      become: true
 
-- name: Template Alloy env file - {{ __alloy_env_file }}
+- name: Template Alloy env file - {{ alloy_env_file }}
   ansible.builtin.template:
     src: "alloy.j2"
-    dest: "{{ __alloy_env_file }}"
-    owner: "root"
-    group: "root"
+    dest: "{{ alloy_env_file }}"
+    owner: "{{ 'root' if alloy_as_root else ansible_user_id }}"
+    group: "{{ 'root' if alloy_as_root else ansible_user_gid }}"
     mode: "0644"
-  notify: restart alloy
+  notify: "restart alloy {{ 'system' if alloy_as_root else 'user' }} service"
+  become: "{{ alloy_as_root }}"
 
-- name: Template Alloy config - /etc/alloy/config.alloy
+- name: Template Alloy config - {{ alloy_config_dir }}/config.alloy
   ansible.builtin.template:
     src: "config.alloy.j2"
-    dest: "/etc/alloy/config.alloy"
-    owner: "root"
-    group: "root"
+    dest: "{{ alloy_config_dir }}/config.alloy"
+    owner: "{{ 'root' if alloy_as_root else ansible_user_id }}"
+    group: "{{ 'root' if alloy_as_root else ansible_user_gid }}"
     mode: "0644"
   when:
     - alloy_config | length > 0
     - alloy_env_file_vars.CONFIG_FILE is not defined
-  notify: restart alloy
+  notify: "restart alloy {{ 'system' if alloy_as_root else 'user' }} service"
+  become: "{{ alloy_as_root }}"
 
-- name: Ensure that /etc/alloy/alloy.config is absent when a custom configuration file/dir is specified in alloy_env_file_vars.CONFIG_FILE
+- name: Ensure that {{ alloy_config_dir }}/config.alloy is absent when a custom configuration file/dir is specified
   ansible.builtin.file:
-    path: "/etc/alloy/config.alloy"
+    path: "{{ alloy_config_dir }}/config.alloy"
     state: absent
   when:
     - alloy_config | length < 1 or alloy_env_file_vars.CONFIG_FILE is defined
+  become: "{{ alloy_as_root }}"
 
 - name: Add the Alloy system user to additional group
   ansible.builtin.user:
@@ -100,12 +151,16 @@
     state: present
   loop: "{{ alloy_user_groups }}"
   when:
+    - alloy_as_root | bool
     - alloy_user_groups | length > 0
+  become: true
 
 - name: Get firewalld state
   ansible.builtin.systemd:
     name: "firewalld"
   register: __firewalld_service_state
+  when: alloy_as_root | bool
+  become: true
 
 - name: Enable firewalld rule to expose Alloy tcp port {{ __alloy_server_http_listen_port }}
   ansible.posix.firewalld:
@@ -114,16 +169,23 @@
     port: "{{ __alloy_server_http_listen_port }}/tcp"
     state: enabled
   when:
+    - alloy_as_root | bool
     - __firewalld_service_state.status.ActiveState == "active"
     - alloy_expose_port | bool
+  become: true
 
 - name: Flush handlers after deployment
   ansible.builtin.meta: flush_handlers
 
-- name: Ensure that Alloy is started
-  ansible.builtin.systemd:
+- name: Ensure that Alloy service is started and enabled
+  ansible.builtin.systemd_service:
     name: alloy.service
     state: started
+    enabled: true
+    scope: "{{ 'system' if alloy_as_root else 'user' }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ '/run/user/' + ansible_user_uid | string if not alloy_as_root else omit }}"
+  become: "{{ alloy_as_root }}"
   when: not ansible_check_mode
 
 - name: Verify that Alloy URL is responding
@@ -134,5 +196,4 @@
   retries: 5
   delay: 8
   until: __alloy_verify_url_status_code.status == 200
-  when:
-    - not ansible_check_mode
+  when: not ansible_check_mode

@@ -1,0 +1,11 @@
+- name: Test Alloy role in root mode
+  hosts: localhost
+  become: true
+  vars:
+    alloy_config: |
+      logging {
+        level  = "debug"
+        format = "logfmt"
+      }
+  roles:
+    - role: "{{ playbook_dir }}/../../../../roles/alloy"

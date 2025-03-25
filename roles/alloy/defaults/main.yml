@@ -31,3 +31,8 @@ alloy_config: {}
 #         url = "http://mimir:9009/api/v1/push"
 #     }
 #   }
+
+alloy_as_root: true
+alloy_install_dir: "{{ '/usr/bin' if alloy_as_root else ansible_env.HOME + '/.alloy/bin' }}"
+alloy_config_dir: "{{ '/etc/alloy' if alloy_as_root else ansible_env.HOME + '/.alloy/config' }}"
+alloy_env_file: "{{ alloy_config_dir + '/env' }}"

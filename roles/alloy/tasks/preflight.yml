@@ -24,3 +24,11 @@
       ansible.builtin.assert:
         that: __alloy_server_http_listen_address | ansible.utils.ipaddr
       when: __alloy_server_http_listen_addr_regex | length > 0
+
+    - name: Validate port for non-root mode
+      ansible.builtin.assert:
+        that: __alloy_server_http_listen_port | int > 1024
+        fail_msg: "Port {{ __alloy_server_http_listen_port }} must be >1024 for non-root mode"
+      when: 
+        - not alloy_as_root
+        - __alloy_server_http_listen_addr_regex | length > 0
